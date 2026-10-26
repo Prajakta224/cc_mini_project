@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # ─── MinIO: S3-Compatible Local Object Storage ──────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: afes-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"   # S3 API endpoint
+      - "9001:9001"   # Web Console UI
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── MinIO Bucket Provisioner ───────────────────────────────────────────────
+  createbuckets:
+    image: minio/mc:RELEASE.2024-01-16T16-06-34Z
+    container_name: afes-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123;
+      /usr/bin/mc mb --ignore-existing myminio/afes-encrypted-files;
+      /usr/bin/mc anonymous set none myminio/afes-encrypted-files;
+      exit 0;
+      "
+
+  # ─── Backend: FastAPI Cryptographic API Service ─────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: afes-backend
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=AFES - Authenticated File Encryption System
+      - APP_ENV=production
+      - DEBUG=false
+      - SECRET_KEY=cf67d4f9f257a09d3b24f5a3e1b7d5e49f8a3c2b1e4d7f9a8b6c4e2d1f3a5b7c
+      - MASTER_KEK=f42577d06b0f1527b8644e96189617be463e891822ab9185c977068b1d6e2f71
+      - DATABASE_URL=sqlite:///./afes.db
+      - STORAGE_PROVIDER=minio
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+      - MINIO_BUCKET=afes-encrypted-files
+      - MINIO_SECURE=false
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173
+      - MAX_UPLOAD_SIZE_MB=100
+    volumes:
+      - backend_db:/app
+
+  # ─── Frontend: React + TypeScript + Vite ───────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: afes-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+
+volumes:
+  minio_data:
+  backend_db:
